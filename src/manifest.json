@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Hearline — Listen to any webpage",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Hearline reads any webpage, article or blog out loud with real-time word highlighting. Free, private, no account.",
   "minimum_chrome_version": "120",
   "permissions": [
@@ -18,9 +18,8 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Hearline",
-    "default_icon": "icons/icon128.png",
-    "default_popup": "popup/popup.html"
+    "default_title": "Read this page with Hearline",
+    "default_icon": "icons/icon128.png"
   },
   "options_ui": {
     "page": "options/options.html",

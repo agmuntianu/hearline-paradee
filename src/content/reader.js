@@ -5,6 +5,7 @@
   const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 
   let R = null // the single active reader session
+  let openedAt = 0 // when R was claimed, so a start that never finished can be released
 
   const pageKey = () => location.origin + location.pathname + location.search
 
@@ -22,10 +23,19 @@
   async function open({ autoplay = false, selection = false } = {}) {
     if (R) {
       const existing = R.api
-      if (!existing) return null // still loading
-      if (selection) await existing.readSelection()
-      else if (autoplay) existing.play()
-      return existing
+      if (!existing) {
+        if (Date.now() - openedAt < 4000) return null // still loading
+        // A start that died part way (thrown in an await) would otherwise block every later
+        // attempt forever: the session object exists but never gets its api. Drop it.
+        console.warn('hearline: releasing a reader session that never finished starting')
+        R = null
+        HL.host.destroy()
+        try { CSS.highlights.clear() } catch (e) { /* nothing else to undo */ }
+      } else {
+        if (selection) await existing.readSelection()
+        else if (autoplay) existing.play()
+        return existing
+      }
     }
     const settings = await HL.settings.load()
     HL.host.applyAppearance(settings)
@@ -44,7 +54,7 @@
       activeEngine: null,
       token: 0,
       rulesVersion: 0,
-      kokoroFailed: false,
+      hqFailed: { paradee: false, kokoro: false }, // an engine that errored once sits out this page
       userScrollAt: 0,
       wordRange: null,
       sleepTimer: null,
@@ -57,9 +67,10 @@
       cleanups: [],
     }
     R = s
+    openedAt = Date.now()
 
     const web = HL.engines.WebEngine()
-    const kokoro = HL.engines.KokoroEngine({
+    const hq = HL.engines.HqEngine({
       onMedia: (action) => {
         if (action === 'play') play()
         else if (action === 'pause') pause()
@@ -108,33 +119,43 @@
 
     // ---- voices -------------------------------------------------------------
     const baseLang = HL.lang.baseLang
-    function kokoroUsable() {
-      return s.settings.kokoro.installed && HL.kokoroVoices.supports(s.lang) && !s.kokoroFailed
+    /** Can this HQ engine speak this page on this machine right now? */
+    function hqUsable(engine) {
+      return !s.hqFailed[engine] && HL.hq.usable(s.settings, engine, s.lang)
+    }
+
+    /** The engine's measured thread count, 0 = let the offscreen worker decide. */
+    function hqThreads(engine) {
+      return HL.hq.state(s.settings, engine).threads || 0
     }
 
     function resolveVoice() {
       const saved = s.settings.voices[baseLang(s.lang)]
-      if (saved && saved.engine === 'kokoro' && kokoroUsable()) return { engine: 'kokoro', id: saved.id }
       if (saved && saved.engine === 'web') {
         const v = HL.voices.pickVoice(s.webVoices, { saved, lang: s.lang })
         if (v) return { engine: 'web', voice: v, saved: true }
       }
-      // Default to HQ only when the device can keep up (speed test), otherwise stay on system voices.
-      const slow = s.settings.kokoro.rtf != null && s.settings.kokoro.rtf > 1.1
-      if (!saved && kokoroUsable() && !slow) return { engine: 'kokoro', id: HL.kokoroVoices.defaultFor(s.lang) }
+      // HQ is the default only when it is installed, fits the language and passed the speed test.
+      const choice = HL.hq.pick(s.settings, { saved, lang: s.lang })
+      if (choice && hqUsable(choice.engine)) return { engine: choice.engine, id: choice.id }
       return { engine: 'web', voice: HL.voices.pickVoice(s.webVoices, { lang: s.lang }) }
     }
 
     function voiceLabel(rv) {
-      if (rv.engine === 'kokoro') {
-        const v = HL.kokoroVoices.VOICES.find((x) => x.id === rv.id)
-        return v ? v.name : 'HQ'
+      if (rv.engine !== 'web') {
+        const v = HL.hq.find(rv.engine, rv.id)
+        return v ? (rv.engine === 'paradee' ? `${v.name} (fast)` : v.name) : 'HQ'
       }
       if (!rv.voice) return 'No voice'
       return rv.voice.name.replace(/^(Microsoft|Google)\s+/i, '').replace(/\s*\(.*?\)/g, '').replace(/\s+-\s+.*$/, '').replace(/\s+Online$/i, '') || 'Voice'
     }
 
-    function refreshVoiceLabel() { ui.setVoiceLabel(voiceLabel(resolveVoice())) }
+    function refreshVoiceLabel() {
+      const rv = resolveVoice()
+      ui.setVoiceLabel(voiceLabel(rv))
+      // Loading the model and speaking one word happens now, not inside the first sentence.
+      if (rv.engine !== 'web') hq.warm(rv.engine, hqThreads(rv.engine))
+    }
 
     // ---- highlighting ---------------------------------------------------------
     const mode = () => s.settings.highlight
@@ -190,7 +211,7 @@
     }
 
     // ---- playback ---------------------------------------------------------------
-    function engineFor(rv) { return rv.engine === 'kokoro' ? kokoro : web }
+    function engineFor(rv) { return rv.engine === 'web' ? web : hq }
 
     function setStatus(st) {
       s.status = st
@@ -242,7 +263,15 @@
       savePosition()
 
       const guard = (fn) => (...a) => { if (myToken === s.token && R === s) fn(...a) }
-      engine.speak(spoken.text, { voice: rv.engine === 'kokoro' ? rv.id : rv.voice, rate: s.settings.rate, lang: s.lang, title: document.title }, {
+      const opts = {
+        voice: rv.engine === 'web' ? rv.voice : rv.id,
+        engine: rv.engine,
+        rate: s.settings.rate,
+        lang: s.lang,
+        title: document.title,
+        threads: rv.engine === 'web' ? 0 : hqThreads(rv.engine),
+      }
+      engine.speak(spoken.text, opts, {
         onStatus: guard((st) => ui.setBusy(st === 'loading')),
         onWord: guard((i) => { ui.setBusy(false); showWord(c, spoken.toOriginal(i)) }),
         onEnd: guard(() => {
@@ -263,21 +292,21 @@
         onError: guard((err) => onSpeechError(err, rv)),
       })
 
-      if (rv.engine === 'kokoro') {
+      if (rv.engine !== 'web') {
         const upcoming = []
         for (let k = 1; k <= 2; k++) {
           const n = s.chunks[s.idx + k]
           if (n) upcoming.push(spokenFor(n).text)
         }
-        kokoro.prefetch(upcoming, rv.id)
+        hq.prefetch(upcoming, opts)
       }
     }
 
     function onSpeechError(err, rv) {
       s.engineActive = false
       setStatus('paused')
-      if (rv.engine === 'kokoro') {
-        s.kokoroFailed = true
+      if (rv.engine !== 'web') {
+        s.hqFailed[rv.engine] = true // this engine sits the rest of this page out
         refreshVoiceLabel()
         ui.toast('HQ voice unavailable — switched to a system voice. Press play to continue.', 4500)
         return
@@ -417,7 +446,7 @@
     }
 
     function pickVoiceEntry(entry) {
-      const saved = entry.engine === 'kokoro' ? { engine: 'kokoro', id: entry.id } : HL.voices.serialize(entry.voice)
+      const saved = entry.engine === 'web' ? HL.voices.serialize(entry.voice) : { engine: entry.engine, id: entry.id }
       s.settings.voices[baseLang(s.lang)] = saved
       HL.settings.save({ voices: { [baseLang(s.lang)]: saved } })
       refreshVoiceLabel()
@@ -428,15 +457,20 @@
     function voiceModel() {
       const rv = resolveVoice()
       const pref = String(s.lang).toLowerCase() === 'en-gb' ? 'en-GB' : 'en-US'
-      const catalog = HL.kokoroVoices.VOICES.slice().sort((a, b) => (b.lang === pref) - (a.lang === pref))
+      const kokoro = HL.kokoroVoices.VOICES.slice().sort((a, b) => (b.lang === pref) - (a.lang === pref))
       return {
         lang: s.lang,
+        // Paradee first: one voice, small download, comfortably real time on ordinary hardware.
+        paradeeSupported: HL.hq.supports('paradee', s.lang),
+        paradeeInstalled: HL.hq.installed(s.settings, 'paradee') && !s.hqFailed.paradee,
+        paradeeSlow: HL.hq.slow(s.settings, 'paradee'),
+        paradee: HL.hq.voices('paradee'),
         kokoroSupported: HL.kokoroVoices.supports(s.lang),
-        kokoroInstalled: s.settings.kokoro.installed && !s.kokoroFailed,
-        kokoroSlow: s.settings.kokoro.rtf != null && s.settings.kokoro.rtf > 1.1,
-        kokoro: catalog,
+        kokoroInstalled: HL.hq.installed(s.settings, 'kokoro') && !s.hqFailed.kokoro,
+        kokoroSlow: HL.hq.slow(s.settings, 'kokoro'),
+        kokoro,
         web: HL.voices.groupVoices(s.webVoices, s.lang),
-        current: rv.engine === 'kokoro' ? { engine: 'kokoro', id: rv.id } : { engine: 'web', uri: rv.voice && rv.voice.voiceURI },
+        current: rv.engine === 'web' ? { engine: 'web', uri: rv.voice && rv.voice.voiceURI } : { engine: rv.engine, id: rv.id },
       }
     }
 
@@ -510,12 +544,12 @@
 
     async function exportAudio() {
       const rv = resolveVoice()
-      if (rv.engine !== 'kokoro') { ui.toast('Pick an HQ voice first (Voice menu).'); return }
+      if (rv.engine === 'web') { ui.toast('Pick an HQ voice first (Voice menu).'); return }
       const texts = s.chunks.map((c) => spokenFor(c).text).filter((t) => /[\p{L}\p{N}]/u.test(t))
       if (!texts.length) return
       if (texts.length > 1500) { ui.toast('Page is too long to export in one go.'); return }
       try {
-        const port = await kokoro.exportAudio(texts, rv.id, document.title)
+        const port = await hq.exportAudio(texts, { engine: rv.engine, voice: rv.id, title: document.title, rate: s.settings.rate, threads: hqThreads(rv.engine) })
         const onMsg = (m) => {
           if (m.t === 'export-progress') ui.toast(`Creating audio… ${m.done} / ${m.total}`, 4000)
           else if (m.t === 'export-done') { ui.toast('Audio saved to your downloads.'); port.onMessage.removeListener(onMsg) }
@@ -577,7 +611,7 @@
         theme: s.settings.theme,
         autoScroll: s.settings.autoScroll,
         sleep: s.sleepSetting,
-        kokoroInstalled: s.settings.kokoro.installed && HL.kokoroVoices.supports(s.lang),
+        hqInstalled: hqUsable('paradee') || hqUsable('kokoro'),
       }),
     }, () => s.settings)
 
@@ -605,6 +639,7 @@
       moveRaf = requestAnimationFrame(() => {
         moveRaf = 0
         if (ui.isOverUi(e)) return
+        if (ui.nearHover(e.clientX, e.clientY)) return // keep it up while the pointer reaches for it
         let el = e.target instanceof Element ? e.target : null
         for (let d = 0; el && d < 14; d++, el = el.parentElement) {
           const id = s.elToBlock.get(el)
@@ -667,7 +702,7 @@
       const lb = baseLang(s.lang)
       onSettingsApplied()
       if (next.rate !== old.rate) applyRate()
-      if (JSON.stringify(next.voices[lb]) !== JSON.stringify(old.voices[lb]) || next.kokoro.installed !== old.kokoro.installed) {
+      if (JSON.stringify(next.voices[lb]) !== JSON.stringify(old.voices[lb]) || JSON.stringify(next.hq) !== JSON.stringify(old.hq)) {
         refreshVoiceLabel()
         if (s.status === 'playing') jump(s.idx, { play: true })
       }
@@ -690,7 +725,7 @@
         store(POS_KEY, {}, (map) => { map[pageKey()] = { idx: s.idx, total: s.all.length, ts: Date.now() }; return map })
       }
       web.cancel()
-      kokoro.cancel()
+      hq.cancel()
       if (s.rsvp) s.rsvp.close()
       clearHighlights()
       s.cleanups.forEach((fn) => { try { fn() } catch (e) { /* ignore */ } })
@@ -711,16 +746,20 @@
     const api = { play, pause, toggle, close, readSelection, status: () => s.status, isOpen: () => R === s }
     s.api = api
 
-    if (selection) await readSelection()
-    else if (autoplay) {
+    if (selection) {
+      await readSelection()
+    } else {
+      // Opening only shows the controls; the voice starts when the user presses play.
       let saved = null
       try { saved = ((await chrome.storage.local.get(POS_KEY))[POS_KEY] || {})[pageKey()] } catch (e) { /* ignore */ }
-      const canSpeakNow = resolveVoice().engine === 'kokoro' || (navigator.userActivation && navigator.userActivation.hasBeenActive) || !navigator.userActivation
       if (saved && saved.idx > 2 && saved.idx < s.all.length - 2 && Math.abs(saved.total - s.all.length) <= Math.max(5, saved.total * 0.1)) {
         ui.showBanner(`Resume from sentence ${saved.idx + 1} of ${s.all.length}?`, [['Resume', () => jump(saved.idx, { play: true })], ['Dismiss', () => {}]])
       }
-      if (canSpeakNow) play()
-      else ui.toast('Press play to start (the browser needs a click on the page first).', 5000)
+      if (autoplay) {
+        const canSpeakNow = resolveVoice().engine !== 'web' || (navigator.userActivation && navigator.userActivation.hasBeenActive) || !navigator.userActivation
+        if (canSpeakNow) play()
+        else ui.toast('Press play to start (the browser needs a click on the page first).', 5000)
+      }
     }
     return api
   }

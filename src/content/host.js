@@ -20,6 +20,7 @@
   let host = null
   let shadow = null
   let extra = null
+  let componentCss = '' // every component stylesheet registered so far, kept for re-creating the host
 
   function get() {
     if (host && host.isConnected) return { host, root: shadow }
@@ -27,7 +28,9 @@
     host.id = 'hearline-root'
     shadow = host.attachShadow({ mode: 'open' })
     const style = document.createElement('style')
-    style.textContent = BASE_CSS
+    // close() destroys the host, and the content scripts are not re-injected on a second
+    // open, so the component CSS has to come back from here or the player renders unstyled.
+    style.textContent = BASE_CSS + componentCss
     shadow.appendChild(style)
     document.documentElement.appendChild(host)
     extra = null
@@ -35,10 +38,9 @@
   }
 
   function addStyle(css) {
-    const { root: r } = get()
-    const s = document.createElement('style')
-    s.textContent = css
-    r.appendChild(s)
+    if (componentCss.includes(css)) return
+    componentCss += css
+    if (host && host.isConnected) shadow.querySelector('style').textContent = BASE_CSS + componentCss
   }
 
   function applyAppearance(settings) {

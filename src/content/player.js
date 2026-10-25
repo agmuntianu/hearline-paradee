@@ -70,6 +70,7 @@
     .hover { position: fixed; width: 32px; height: 32px; border-radius: 50%; background: var(--accent); color: #fff; display: none;
       place-items: center; pointer-events: auto; box-shadow: 0 2px 10px rgba(0,0,0,.25); }
     .hover svg { width: 18px; height: 18px; }
+    .hover::after { content: ""; position: absolute; inset: -14px; border-radius: 50%; }
     .side { position: fixed; top: 16px; right: 16px; bottom: 100px; width: min(360px, calc(100vw - 32px)); background: var(--bg); color: var(--fg);
       border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); display: flex; flex-direction: column; pointer-events: auto; }
     .side header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); font-weight: 700; }
@@ -126,6 +127,7 @@
     const progress = $('.progress')
     const banner = $('.banner')
     let hoverBlock = -1
+    let hoverSpot = null // where the hover button is, and the block it belongs to
 
     // ---- popovers --------------------------------------------------------
     function closePop() {
@@ -173,13 +175,27 @@
         b.addEventListener('click', () => { onPick(); closePop() })
         return b
       }
+      const cta = (label) => {
+        const b = h('button', { class: 'cta' }, label)
+        b.addEventListener('click', () => { closePop(); handlers.action('installVoices') })
+        pop.appendChild(b)
+      }
+      // Fast voice first: one choice, small download, and it keeps up on ordinary hardware.
+      if (m.paradeeSupported) {
+        if (!m.paradeeInstalled) cta('Get the fast HQ voice (one-time 9 MB, works offline)')
+        else {
+          pop.appendChild(h('h4', {}, 'Hearline HQ \u00b7 fast (offline)'))
+          if (m.paradeeSlow) pop.appendChild(h('div', { class: 'note' }, 'Heads-up: the speed test found this voice slower than real time on this computer, so expect pauses.'))
+          for (const v of m.paradee) {
+            pop.appendChild(row(`${v.name} (fast)`, '', m.current.engine === 'paradee' && m.current.id === v.id, () => handlers.action('pickVoice', { engine: 'paradee', id: v.id })))
+          }
+        }
+      }
       if (m.kokoroSupported) {
         if (!m.kokoroInstalled) {
-          const cta = h('button', { class: 'cta' }, 'Get free HQ voices (one-time ~90 MB, works offline)')
-          cta.addEventListener('click', () => { closePop(); handlers.action('installVoices') })
-          pop.appendChild(cta)
+          if (!m.paradeeSupported || m.paradeeInstalled) cta('Get 28 more HQ voices (one-time ~95 MB, offline)')
         } else {
-          pop.appendChild(h('h4', {}, 'Hearline HQ · offline'))
+          pop.appendChild(h('h4', {}, 'Hearline HQ \u00b7 more voices (offline)'))
           if (m.kokoroSlow) pop.appendChild(h('div', { class: 'note' }, 'Heads-up: the speed test found these voices slower than real time on this computer, so expect pauses.'))
           for (const v of m.kokoro) {
             pop.appendChild(row(`${v.name} (${v.lang === 'en-GB' ? 'UK' : 'US'}, ${v.gender === 'F' ? 'female' : 'male'})`, '', m.current.engine === 'kokoro' && m.current.id === v.id, () => handlers.action('pickVoice', { engine: 'kokoro', id: v.id })))
@@ -196,7 +212,7 @@
         for (const v of m.web.other) det.appendChild(row(`${v.name} · ${v.lang}`, v.localService ? '' : 'online', m.current.engine === 'web' && m.current.uri === v.voiceURI, () => handlers.action('pickVoice', { engine: 'web', voice: v })))
         pop.appendChild(det)
       }
-      if (!m.web.match.length && !m.web.other.length && !(m.kokoroSupported && m.kokoroInstalled)) {
+      if (!m.web.match.length && !m.web.other.length && !((m.paradeeSupported && m.paradeeInstalled) || (m.kokoroSupported && m.kokoroInstalled))) {
         pop.appendChild(h('div', { class: 'note' }, 'No system voices found. On Ubuntu install speech-dispatcher and espeak-ng (sudo apt install speech-dispatcher espeak-ng) and restart Chrome, or install the free HQ voices.'))
       } else if (!m.web.match.length) {
         pop.appendChild(h('div', { class: 'note' }, `No system voice for “${m.lang}”.`))
@@ -221,7 +237,7 @@
       pop.appendChild(item('Summary of this page', 'summary'))
       pop.appendChild(item('Speed reading (one word at a time)', 'rsvp'))
       pop.appendChild(item('Bookmark this sentence', 'bookmark'))
-      if (st.kokoroInstalled) pop.appendChild(item('Download page as audio (HQ voice)', 'export'))
+      if (st.hqInstalled) pop.appendChild(item('Download page as audio (HQ voice)', 'export'))
       pop.appendChild(item('Rescan page', 'rescan'))
       pop.appendChild(h('h4', {}, 'Appearance'))
       pop.appendChild(select('Highlight', 'highlight', [['pill', 'Word pill'], ['underline', 'Word underline'], ['sentence', 'Sentence'], ['sentence-word', 'Sentence + word']], st.highlight))
@@ -345,11 +361,24 @@
       },
       showHover(rect, blockId) {
         hoverBlock = blockId
+        const left = Math.max(4, rect.left - 40)
+        const top = Math.max(4, Math.min(window.innerHeight - 40, rect.top))
+        hoverSpot = { left, top, block: rect }
         hover.style.display = 'grid'
-        hover.style.left = Math.max(4, rect.left - 40) + 'px'
-        hover.style.top = Math.max(4, Math.min(window.innerHeight - 40, rect.top)) + 'px'
+        hover.style.left = left + 'px'
+        hover.style.top = top + 'px'
       },
-      hideHover() { hoverBlock = -1; hover.style.display = 'none' },
+      // The button floats in the gutter beside the paragraph. Without this check the pointer
+      // steps off the paragraph on its way to the button, the block stops matching, and the
+      // button disappears under the cursor — very visible on Wikipedia's indented columns.
+      nearHover(x, y) {
+        if (hoverBlock < 0 || !hoverSpot) return false
+        const pad = 24
+        const b = hoverSpot.block
+        if (x >= hoverSpot.left - pad && x <= hoverSpot.left + 32 + pad && y >= hoverSpot.top - pad && y <= hoverSpot.top + 32 + pad) return true
+        return x >= b.left - 40 - pad && x <= b.right + pad && y >= b.top - pad && y <= b.bottom + pad
+      },
+      hideHover() { hoverBlock = -1; hoverSpot = null; hover.style.display = 'none' },
       isOverUi(e) { return e.composedPath().includes(hover) || e.composedPath().includes(bar) },
       setPosition(pos) { if (pos) place(pos.x, pos.y) },
       showSummary({ items, k, onPick, onRead, onK, onClose }) {

@@ -6,6 +6,7 @@ const CONTENT_FILES = [
   'shared/lang.js',
   'shared/voices.js',
   'shared/kokoro-voices.js',
+  'shared/hq.js',
   'content/extract.js',
   'content/engines.js',
   'content/summarize.js',
@@ -53,6 +54,14 @@ chrome.commands.onCommand.addListener(async (command) => {
   if (!tab || tab.id == null) return
   if (command === 'toggle-hearline') run(tab.id, 'toggle')
   else if (command === 'read-selection') run(tab.id, 'readSelection')
+})
+
+// The toolbar button opens the controls directly — no popup in between.
+const UNSUPPORTED_PAGE = /^(chrome|edge|about|chrome-extension|moz-extension|view-source|devtools):|^https:\/\/(chrome\.google\.com\/webstore|chromewebstore\.google\.com)/i
+chrome.action.onClicked.addListener((tab) => {
+  if (!tab || tab.id == null || UNSUPPORTED_PAGE.test(tab.url || '')) return // nothing to read here
+  if (/\.pdf($|[?#])/i.test(tab.url || '')) return // the viewer page blocks content scripts; use the selection menu
+  run(tab.id, 'toggle')
 })
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {

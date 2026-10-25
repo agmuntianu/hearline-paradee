@@ -10,10 +10,10 @@
         return false
       case 'toggle':
         if (HL.reader.isOpen()) { HL.reader.close(); sendResponse({ ok: true, open: false }) }
-        else HL.reader.open({ autoplay: true }).then(() => sendResponse({ ok: true, open: true }))
+        else HL.reader.open({ autoplay: false }).then(() => sendResponse({ ok: true, open: true }))
         return true
       case 'readPage':
-        HL.reader.open({ autoplay: true }).then(() => sendResponse({ ok: true }))
+        HL.reader.open({ autoplay: false }).then(() => sendResponse({ ok: true }))
         return true
       case 'readSelection':
         HL.reader.open({ selection: true }).then(() => sendResponse({ ok: true }))
