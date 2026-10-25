@@ -29,8 +29,10 @@ async function main() {
   const base = HL.lang.baseLang(lang)
   const web = await HL.voices.loadVoices()
   const select = $('voice')
-  const kokoroOk = settings.kokoro.installed && HL.kokoroVoices.supports(lang)
-  const kokoroDefault = kokoroOk && !(settings.kokoro.rtf != null && settings.kokoro.rtf > 1.1)
+  const paradeeInstalled = HL.hq.installed(settings, 'paradee')
+  const kokoroInstalled = HL.hq.installed(settings, 'kokoro')
+  // What the reader would actually pick on this page (fast voice first, then Kokoro).
+  const choice = HL.hq.pick(settings, { saved: settings.voices[base], lang })
   const saved = settings.voices[base]
 
   const group = (label, items) => {
@@ -45,25 +47,31 @@ async function main() {
   }
   const groups = HL.voices.groupVoices(web, lang)
   const current = HL.voices.pickVoice(web, { saved, lang })
-  if (kokoroOk) {
-    group('Hearline HQ (offline)', HL.kokoroVoices.VOICES.map((v) => [`k:${v.id}`, `${v.name} (${v.lang === 'en-GB' ? 'UK' : 'US'})`, saved ? saved.engine === 'kokoro' && saved.id === v.id : kokoroDefault && v.id === HL.kokoroVoices.defaultFor(lang)]))
+  const on = (engine, id) => choice ? choice.engine === engine && choice.id === id : false
+  if (paradeeInstalled && HL.hq.supports('paradee', lang)) {
+    group('Hearline HQ · fast (offline)', HL.hq.voices('paradee').map((v) => [`p:${v.id}`, `${v.name} (fast)`, on('paradee', v.id)]))
   }
-  group(`System voices (${lang})`, groups.match.map((v) => [`w:${v.voiceURI}`, v.name, !((kokoroDefault && !saved) || (saved && saved.engine === 'kokoro' && kokoroOk)) && current && current.voiceURI === v.voiceURI]))
+  if (kokoroInstalled && HL.kokoroVoices.supports(lang)) {
+    group('Hearline HQ · more voices (offline)', HL.kokoroVoices.VOICES.map((v) => [`k:${v.id}`, `${v.name} (${v.lang === 'en-GB' ? 'UK' : 'US'})`, on('kokoro', v.id)]))
+  }
+  group(`System voices (${lang})`, groups.match.map((v) => [`w:${v.voiceURI}`, v.name, !choice && current && current.voiceURI === v.voiceURI]))
   group('Other languages', groups.other.map((v) => [`w:${v.voiceURI}`, `${v.name} · ${v.lang}`, false]))
 
   if (!select.options.length) {
     select.disabled = true
     $('voice-note').hidden = false
     $('voice-note').textContent = 'No system voices found. Open Settings for help or to install free HQ voices.'
-  } else if (!kokoroOk && HL.kokoroVoices.supports(lang)) {
+  } else if (!choice && HL.hq.supports('paradee', lang)) {
     $('voice-note').hidden = false
-    $('voice-note').innerHTML = 'Want a more natural voice? <a href="#" id="get-hq">Get free HQ voices</a>'
+    $('voice-note').innerHTML = 'Want a more natural voice? <a href="#" id="get-hq">Get the free HQ voice (9&nbsp;MB)</a>'
     $('get-hq').addEventListener('click', (e) => { e.preventDefault(); chrome.runtime.sendMessage({ type: 'open-options', hash: 'voices' }); window.close() })
   }
 
   select.addEventListener('change', () => {
     const v = select.value
-    const entry = v.startsWith('k:') ? { engine: 'kokoro', id: v.slice(2) } : HL.voices.serialize(web.find((x) => x.voiceURI === v.slice(2)))
+    const entry = v.startsWith('p:') ? { engine: 'paradee', id: v.slice(2) }
+      : v.startsWith('k:') ? { engine: 'kokoro', id: v.slice(2) }
+      : HL.voices.serialize(web.find((x) => x.voiceURI === v.slice(2)))
     HL.settings.save({ voices: { [base]: entry } })
   })
 

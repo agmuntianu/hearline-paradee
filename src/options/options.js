@@ -3,7 +3,7 @@ const $ = (id) => document.getElementById(id)
 let settings = null
 
 const fmtRate = (v) => `${(+v).toFixed(2).replace(/0$/, '').replace(/\.0$/, '')}×`
-const save = async (patch) => { settings = await HL.settings.save(patch) }
+const save = async (patch) => { settings = await HL.settings.save(patch); return settings }
 
 function bind() {
   $('rate').value = settings.rate
@@ -31,6 +31,13 @@ function bind() {
 }
 
 // ---- HQ voices ------------------------------------------------------------------
+// Two installs, one widget shape: Paradee (one voice, 9 MB, comfortably real time) and the
+// full Kokoro set (28 voices, ~95 MB, needs a fast machine).
+const HQ = {
+  paradee: { prefix: 'fast' },
+  kokoro: { prefix: 'more', some: () => HL.kokoroVoices.INSTALL_DEFAULT, all: () => HL.kokoroVoices.VOICES.map((v) => v.id) },
+}
+
 function installer() {
   return new Promise((resolve) => {
     if (window.HLInstaller) return resolve(window.HLInstaller)
@@ -38,78 +45,94 @@ function installer() {
   })
 }
 
-async function refreshHq() {
+async function refreshEngine(engine) {
+  const p = HQ[engine].prefix
   const inst = await installer()
-  const installed = await inst.isInstalled()
-  if (installed !== settings.kokoro.installed) await save({ kokoro: { installed } })
-  $('hq-status').textContent = installed ? '✓ Installed — works offline.' : 'Not installed.'
-  $('hq-install').hidden = installed
-  $('hq-more').hidden = !installed
-  $('hq-remove').hidden = !installed
-  $('hq-bench').hidden = !installed
+  const installed = await inst.isInstalled(engine)
+  const st = (settings.hq || {})[engine] || {}
+  if (installed !== st.installed) settings = await save({ hq: { [engine]: { installed } } })
+  const measured = st.rtf == null ? '' : ` Speed test: ${st.rtf.toFixed(2)}× real time.`
+  $(`${p}-status`).textContent = installed ? `✓ Installed — works offline.${measured}` : 'Not installed.'
+  $(`${p}-install`).hidden = installed
+  if ($(`${p}-more`)) $(`${p}-more`).hidden = !installed
+  $(`${p}-remove`).hidden = !installed
+  $(`${p}-bench`).hidden = !installed
 }
 
-async function runInstall(voices, button) {
+async function runInstall(engine, arg, button) {
+  const p = HQ[engine].prefix
   const inst = await installer()
-  const progress = $('hq-progress')
+  const progress = $(`${p}-progress`)
   button.disabled = true
   progress.hidden = false
-  $('hq-status').textContent = 'Installing… keep this tab open.'
+  $(`${p}-status`).textContent = 'Installing… keep this tab open.'
   try { await navigator.storage.persist() } catch (e) { /* best effort: keeps the cache from being evicted */ }
-  await inst.install(voices, async (m) => {
+  await inst.install(engine, arg, async (m) => {
     if (m.t === 'install-progress') {
       progress.querySelector('.bar').style.width = m.pct + '%'
       progress.querySelector('.label').textContent = `${m.label} · ${m.pct}%`
     } else if (m.t === 'install-done') {
-      await save({ kokoro: { installed: true } })
+      settings = await save({ hq: { [engine]: { installed: true } } })
       progress.hidden = true
       button.disabled = false
-      await refreshHq()
-      $('hq-status').textContent = '✓ Installed — works offline.'
-      if (settings.kokoro.rtf == null) {
-        const out = $('hq-bench-out')
+      await refreshEngine(engine)
+      $(`${p}-status`).textContent = '✓ Installed — works offline.'
+      if (((settings.hq || {})[engine] || {}).rtf == null) {
+        const out = $(`${p}-bench-out`)
         out.hidden = false
-        try { await runBenchmark(out) } catch (e) { out.textContent = `Speed test failed: ${e.message}` }
+        try { await runBenchmark(engine, out) } catch (e) { out.textContent = `Speed test failed: ${e.message}` }
       }
     } else if (m.t === 'install-error') {
       progress.hidden = true
       button.disabled = false
-      $('hq-status').textContent = `Install failed: ${m.message}. Check your connection and try again.`
+      $(`${p}-status`).textContent = `Install failed: ${m.message}. Check your connection and try again.`
     }
   })
 }
 
-// Runs the speed test, saves the best result, and returns { text, best }.
-async function runBenchmark(out) {
+// Runs the speed test, saves the best result (rtf and the thread count that won), and shows it.
+async function runBenchmark(engine, out) {
+  const p = HQ[engine].prefix
   const inst = await installer()
-  const r = await inst.benchmark((msg) => { out.textContent = msg })
+  const r = await inst.benchmark(engine, (msg) => { out.textContent = msg })
   const lines = r.results.map((x) => `${x.threads} thread${x.threads > 1 ? 's' : ''}: ${x.seconds.toFixed(1)} s to make ${x.audio.toFixed(1)} s of speech (${x.rtf.toFixed(2)}× real time)`)
   const best = Math.min(...r.results.map((x) => x.rtf))
-  await save({ kokoro: { rtf: best } })
-  const verdict = best <= 0.8 ? 'Fast enough: HQ voices are your default.' : best <= 1.1 ? 'Borderline: expect short pauses between sentences.' : 'Too slow on this computer: Hearline keeps your system voice as the default. You can still pick an HQ voice, but expect long pauses.'
-  out.textContent = `${lines.join(' · ')} · ${r.cores} CPU cores · isolation ${r.isolated ? 'on' : 'OFF'} · WebGPU ${r.gpu ? 'available' : 'not available'}. ${verdict}`
+  const win = r.results.find((x) => x.rtf === best) || r.results[0]
+  settings = await save({ hq: { [engine]: { rtf: best, threads: win.threads } } })
+  const verdict = best <= 0.8 ? 'Fast enough: this voice is your default.' : best <= 1.1 ? 'Borderline: expect short pauses between sentences.' : 'Too slow on this computer: Hearline keeps your system voice as the default. You can still pick this voice, but expect long pauses.'
+  out.textContent = `${lines.join(' · ')} · ${r.cores} CPU cores · isolation ${r.isolated ? 'on' : 'OFF'}. ${verdict}`
   return best
 }
 
+async function removeEngine(engine) {
+  if (!confirm('Remove this voice? You can install it again later.')) return
+  const inst = await installer()
+  await inst.removeModel(engine)
+  settings = await save({
+    hq: { [engine]: { installed: false, rtf: null, threads: 0 } },
+    voices: Object.fromEntries(Object.entries(settings.voices).filter(([, v]) => v.engine !== engine)),
+  })
+  refreshEngine(engine)
+}
+
 function bindHq() {
-  $('hq-install').addEventListener('click', () => runInstall(HL.kokoroVoices.INSTALL_DEFAULT, $('hq-install')))
-  $('hq-more').addEventListener('click', () => runInstall(HL.kokoroVoices.VOICES.map((v) => v.id), $('hq-more')))
-  $('hq-remove').addEventListener('click', async () => {
-    if (!confirm('Remove the HQ voices? You can install them again later.')) return
-    const inst = await installer()
-    await inst.removeModel()
-    await save({ kokoro: { installed: false, rtf: null }, voices: Object.fromEntries(Object.entries(settings.voices).filter(([, v]) => v.engine !== 'kokoro')) })
-    refreshHq()
-  })
-  $('hq-bench').addEventListener('click', async () => {
-    const out = $('hq-bench-out')
-    const btn = $('hq-bench')
-    btn.disabled = true
-    out.hidden = false
-    try { await runBenchmark(out) } catch (e) { out.textContent = `Speed test failed: ${e.message}` }
-    btn.disabled = false
-  })
-  refreshHq()
+  const wanted = /^#voices(?::(paradee|kokoro))?$/.exec(location.hash)
+  for (const engine of Object.keys(HQ)) {
+    const p = HQ[engine].prefix
+    $(`${p}-install`).addEventListener('click', (e) => runInstall(engine, HQ[engine].some ? HQ[engine].some() : null, e.target))
+    if ($(`${p}-more`)) $(`${p}-more`).addEventListener('click', (e) => runInstall(engine, HQ[engine].all(), e.target))
+    $(`${p}-remove`).addEventListener('click', () => removeEngine(engine))
+    $(`${p}-bench`).addEventListener('click', async (e) => {
+      const out = $(`${p}-bench-out`)
+      const btn = e.target
+      btn.disabled = true
+      out.hidden = false
+      try { await runBenchmark(engine, out) } catch (err) { out.textContent = `Speed test failed: ${err.message}` }
+      btn.disabled = false
+    })
+    if (wanted && wanted[1] === engine) $(`${p}-install`).classList.add('flash')
+    refreshEngine(engine)
+  }
 }
 
 // ---- pronunciation ---------------------------------------------------------------
@@ -187,9 +210,14 @@ function bindData() {
   $('clear-positions').addEventListener('click', async () => { await chrome.storage.local.remove('positions'); alert('Reading positions cleared.') })
   $('clear-all').addEventListener('click', async () => {
     if (!confirm('Reset all settings, bookmarks, stats and saved positions? HQ voices stay installed.')) return
-    const keepKokoro = settings.kokoro.installed
+    const keep = { paradee: settings.hq.paradee, kokoro: settings.hq.kokoro }
     await chrome.storage.local.clear()
-    await HL.settings.save({ kokoro: { installed: keepKokoro } })
+    await HL.settings.save({
+      hq: {
+        paradee: { installed: keep.paradee.installed, rtf: keep.paradee.rtf, threads: keep.paradee.threads },
+        kokoro: { installed: keep.kokoro.installed, rtf: keep.kokoro.rtf },
+      },
+    })
     location.reload()
   })
   renderBookmarks()
@@ -199,7 +227,7 @@ function bindData() {
 ;(async () => {
   settings = await HL.settings.load()
   if (location.hash === '#welcome') $('welcome').hidden = false
-  if (location.hash === '#voices') $('voices').scrollIntoView()
+  if (location.hash.startsWith('#voices')) $('voices').scrollIntoView()
   bind()
   bindHq()
   bindPron()

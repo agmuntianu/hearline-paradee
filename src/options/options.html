@@ -20,17 +20,31 @@
 
     <section id="voices" class="card">
       <h2>HQ voices (offline)</h2>
-      <p>Natural-sounding voices that run entirely on your device — nothing you read is ever sent anywhere. English only (US &amp; UK). One-time download of about 90&nbsp;MB, then it works offline.</p>
-      <p id="hq-status" class="status"></p>
-      <div class="progress" id="hq-progress" hidden><div class="bar"></div><span class="label"></span></div>
+      <p>Natural-sounding voices that run entirely on your device — nothing you read is ever sent anywhere. English only (US &amp; UK).</p>
+
+      <h3>The fast voice <span class="tag">recommended</span></h3>
+      <p class="hint">One American female voice in a 9&nbsp;MB model built for speed: it generates speech faster than most computers can play it, so the reading never stutters.</p>
+      <p id="fast-status" class="status"></p>
+      <div class="progress" id="fast-progress" hidden><div class="bar"></div><span class="label"></span></div>
       <div class="actions">
-        <button id="hq-install" class="btn primary">Install HQ voices</button>
-        <button id="hq-more" class="btn" hidden>Download all voices</button>
-        <button id="hq-remove" class="btn danger" hidden>Remove</button>
+        <button id="fast-install" class="btn primary">Install the fast voice (9&nbsp;MB)</button>
+        <button id="fast-bench" class="btn" hidden>Run speed test</button>
+        <button id="fast-remove" class="btn danger" hidden>Remove</button>
       </div>
-      <div class="actions"><button id="hq-bench" class="btn" hidden>Run speed test</button></div>
-      <p id="hq-bench-out" class="hint" hidden></p>
-      <p class="hint">After installing, open the voice menu in the player to choose a voice. The first 6 voices are included; the others download (~0.5&nbsp;MB each) when you first pick them, or use “Download all voices”.</p>
+      <p id="fast-bench-out" class="hint" hidden></p>
+
+      <h3>More voices</h3>
+      <p class="hint">28 American and British voices from the larger model: about 95&nbsp;MB for the six that come with it, and more for all of them. Much slower than the fast voice — on some computers they cannot keep up, and the speed test below decides whether they are used by default.</p>
+      <p id="more-status" class="status"></p>
+      <div class="progress" id="more-progress" hidden><div class="bar"></div><span class="label"></span></div>
+      <div class="actions">
+        <button id="more-install" class="btn">Install six voices (~95&nbsp;MB)</button>
+        <button id="more-more" class="btn" hidden>Download all voices</button>
+        <button id="more-remove" class="btn danger" hidden>Remove</button>
+      </div>
+      <div class="actions"><button id="more-bench" class="btn" hidden>Run speed test</button></div>
+      <p id="more-bench-out" class="hint" hidden></p>
+      <p class="hint">After installing, open the voice menu in the player to choose a voice. The first six Kokoro voices are included; the others download (~0.5&nbsp;MB each) when you first pick them, or use “Download all voices”.</p>
     </section>
 
     <section class="card">
@@ -98,6 +112,7 @@
 
   <script src="../shared/settings.js"></script>
   <script src="../shared/kokoro-voices.js"></script>
+  <script src="../shared/hq.js"></script>
   <script type="module" src="installer.js"></script>
   <script src="options.js"></script>
 </body>
