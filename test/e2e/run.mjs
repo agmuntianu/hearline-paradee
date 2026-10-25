@@ -1,29 +1,9 @@
 // Real-browser smoke test: loads dist/ in Chromium and drives the content script.
-import { chromium } from 'playwright-core'
-import http from 'node:http'
-import fs from 'node:fs'
-import path from 'node:path'
-import os from 'node:os'
+import * as e2e from './env.mjs'
 
-const root = path.resolve(new URL('../..', import.meta.url).pathname)
-const exe = process.env.CHROME || path.join(os.homedir(), '.cache/ms-playwright/chromium-1243/chrome-linux64/chrome')
-const html = fs.readFileSync(path.join(root, 'test/e2e/article.html'))
-const server = http.createServer((req, res) => { res.setHeader('content-type', 'text/html'); res.end(html) })
-await new Promise((r) => server.listen(0, '127.0.0.1', r))
-const url = `http://127.0.0.1:${server.address().port}/`
-
-const userDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hl-'))
-// activeTab can't be granted without a real user gesture, so test a copy with a localhost host permission.
-const extDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hl-ext-'))
-fs.cpSync(path.join(root, 'dist'), extDir, { recursive: true })
-const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'))
-manifest.host_permissions = ['http://127.0.0.1/*']
-fs.writeFileSync(path.join(extDir, 'manifest.json'), JSON.stringify(manifest))
-const ctx = await chromium.launchPersistentContext(userDir, {
-  executablePath: exe,
-  headless: false,
-  args: ['--headless=new', '--no-sandbox', `--disable-extensions-except=${extDir}`, `--load-extension=${extDir}`],
-})
+const { server, url } = await e2e.articleServer()
+const extDir = e2e.extCopy({ hostPermissions: ['http://127.0.0.1/*'] })
+const ctx = await e2e.launch({ extDir })
 let failed = 0
 const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '  — ' + extra : ''}`); if (!ok) failed++ }
 
@@ -39,10 +19,7 @@ try {
   const before = await page.evaluate(() => document.body.innerHTML)
 
   // Inject + open the reader (selection-free) through the background worker, like the popup does.
-  const res = await sw.evaluate(async (u) => {
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
-    return run(tab.id, 'readPage')
-  }, url)
+  const res = await sw.evaluate(async (id) => run(id, 'readPage'), await e2e.tabIdOf(sw, url))
   check('background injected content scripts', res && res.ok, JSON.stringify(res))
   await page.waitForSelector('#hearline-root', { state: 'attached', timeout: 8000 })
   check('player host attached', true)
@@ -52,13 +29,33 @@ try {
   const total = parseInt(count.split('/')[1])
   check('sentences extracted (nav/footer/code skipped)', total >= 9 && total <= 14, `total=${total}`)
 
+  const play0 = await page.locator('#hearline-root >> [data-a="toggle"]').getAttribute('aria-label')
+  check('opening shows the controls and waits for play', play0 === 'Play', play0)
+
+  // "Read from here": the button must survive the trip from the paragraph to the gutter.
+  const para = page.locator('p').filter({ hasText: 'Solar panels convert sunlight' }).first()
+  const pbox = await para.boundingBox()
+  await page.mouse.move(pbox.x + 30, pbox.y + 5)
+  await page.waitForTimeout(300)
+  const hv = page.locator('#hearline-root >> .hover')
+  check('a play button appears beside the paragraph', await hv.isVisible())
+  const hbox = await hv.boundingBox()
+  await page.mouse.move(hbox.x + hbox.width / 2, hbox.y - 16) // on the way there, off the paragraph
+  await page.waitForTimeout(300)
+  check('it stays up while the pointer reaches for it', await hv.isVisible())
+  await page.mouse.click(hbox.x + hbox.width / 2, hbox.y + hbox.height / 2)
+  await page.waitForTimeout(500)
+  const cAfterHover = await page.locator('#hearline-root >> .count').textContent()
+  check('clicking it reads from that paragraph', !cAfterHover.trim().startsWith('1 /'), cAfterHover)
+
   const after = await page.evaluate(() => document.body.innerHTML)
   check('page body not mutated (only shadow host added)', after.replace(/<div id="hearline-root"><\/div>/, '') === before)
 
   // Controls
+  const c0 = await page.locator('#hearline-root >> .count').textContent()
   await page.locator('#hearline-root >> [data-a="next"]').click()
   const c2 = await page.locator('#hearline-root >> .count').textContent()
-  check('next sentence moves position', c2.startsWith('2'), c2)
+  check('next sentence moves position', parseInt(c2) === parseInt(c0) + 1, `${c0.trim()} -> ${c2.trim()}`)
   await page.locator('#hearline-root >> [data-a="nextPara"]').click()
   const c3 = await page.locator('#hearline-root >> .count').textContent()
   console.log('      after next paragraph:', c3)
@@ -73,7 +70,7 @@ try {
   check('voice popover opens', await page.locator('#hearline-root >> .pop').isVisible())
   const popText = await page.locator('#hearline-root >> .pop').innerText()
   console.log('      voice popover:', popText.replace(/\n+/g, ' | ').slice(0, 200))
-  check('voice popover offers HQ install or voices', /HQ voices|System voices|No system voices/i.test(popText))
+  check('voice popover offers HQ install or voices', /HQ voice|System voices|No system voices/i.test(popText))
   await page.keyboard.press('Escape')
 
   // Summary
@@ -82,6 +79,8 @@ try {
   await page.waitForSelector('#hearline-root >> .side')
   const items = await page.locator('#hearline-root >> .side .item').count()
   check('summary lists sentences', items >= 3, `items=${items}`)
+  const sideBox = await page.locator('#hearline-root >> .side').boundingBox()
+  check('the summary panel is styled (the component CSS parsed)', sideBox && sideBox.width < 500, JSON.stringify(sideBox))
   await page.locator('#hearline-root >> .side header button').click()
 
   // RSVP
@@ -105,25 +104,43 @@ try {
   check('Escape closes the player', (await page.locator('#hearline-root').count()) === 0)
 
   // Second open works (idempotent)
-  await sw.evaluate(async (u) => { const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }); return run(tab.id, 'toggle') }, url)
+  await sw.evaluate(async (id) => run(id, 'toggle'), await e2e.tabIdOf(sw, url))
   await page.waitForSelector('#hearline-root', { state: 'attached' })
   check('toggle reopens player', true)
   const roots = await page.locator('#hearline-root').count()
   check('only one player host', roots === 1)
 
+  // The exact path a user takes: close with the X, then start reading again.
+  await page.locator('#hearline-root >> [data-a="close"]').click()
+  await page.waitForTimeout(400)
+  check('the X button closes the player', (await page.locator('#hearline-root').count()) === 0)
+  await sw.evaluate(async (id) => run(id, 'readPage'), await e2e.tabIdOf(sw, url))
+  await page.waitForSelector('#hearline-root >> .bar', { state: 'visible', timeout: 8000 })
+  check('reading again after the X shows the controls again', await page.locator('#hearline-root >> .bar').isVisible())
+  const barBox = await page.locator('#hearline-root >> .bar').boundingBox()
+  const barPe = await page.locator('#hearline-root >> .bar').evaluate((el) => getComputedStyle(el).pointerEvents)
+  check('the reopened player is styled and clickable', barBox && barBox.width < 800 && barBox.height > 60 && barPe === 'auto', `${JSON.stringify(barBox)} pointer-events:${barPe}`)
+
   // Options page loads
   const opt = await ctx.newPage()
   const extId = new URL(sw.url()).host
   await opt.goto(`chrome-extension://${extId}/options/options.html#welcome`)
-  await opt.waitForSelector('#hq-status')
-  await opt.waitForFunction(() => /Not installed|Installed/.test(document.getElementById('hq-status').textContent), null, { timeout: 8000 })
-  check('options page renders HQ status', true, await opt.locator('#hq-status').textContent())
+  await opt.waitForSelector('#fast-status')
+  await opt.waitForFunction(() => /Not installed|Installed/.test(document.getElementById('fast-status').textContent), null, { timeout: 8000 })
+  check('options page renders HQ status', true, await opt.locator('#fast-status').textContent())
 
   // Popup page loads
   const pop = await ctx.newPage()
   await pop.goto(`chrome-extension://${extId}/popup/popup.html`)
   await pop.waitForSelector('#read-page, #msg:not([hidden])')
   check('popup renders', true)
+  // The popup blocks in this harness (its own tab is the "active" tab), so check the voice
+  // rules it depends on are actually loaded there instead of driving the list.
+  const hqOk = await pop.evaluate(() => {
+    const s = { hq: { paradee: { installed: true, rtf: 0.3, threads: 0 }, kokoro: { installed: false, rtf: null } } }
+    return { api: typeof HL.hq.pick, voices: HL.hq.voices('paradee').length, pick: HL.hq.pick(s, { saved: null, lang: 'en' }) }
+  })
+  check('popup has the HQ voice rules loaded', hqOk.api === 'function' && hqOk.voices === 1 && hqOk.pick && hqOk.pick.engine === 'paradee', JSON.stringify(hqOk))
 
   console.log('\nconsole/page errors:', errors.length ? errors : 'none')
   if (errors.length) failed++
