@@ -3,9 +3,10 @@
 
   /**
    * Engine interface:
-   *   speak(text, { voice, rate, lang }, { onWord(charIndex), onEnd(), onError(err), onStatus(s) })
-   *   pause() resume() cancel() setRate(rate) prefetch(texts, voice)
+   *   speak(text, { engine, voice, rate, lang, threads }, { onWord(charIndex), onEnd(), onError(err), onStatus(s) })
+   *   pause() resume() cancel() setRate(rate) prefetch(texts, opts) warm(engine, threads)
    * onWord receives a character index into the text given to speak().
+   * `engine` is 'web' | 'paradee' | 'kokoro'; the two HQ ones are spoken by the offscreen document.
    */
 
   function WebEngine() {
@@ -91,8 +92,11 @@
     }
   }
 
-  /** Talks to the offscreen document that runs Kokoro and plays the audio. */
-  function KokoroEngine({ onMedia }) {
+  /**
+   * Talks to the offscreen document that runs the HQ voices (Paradee, Kokoro) and plays
+   * the audio. One port serves both engines; each request carries `engine`.
+   */
+  function HqEngine({ onMedia }) {
     let port = null
     let connecting = null
     let seq = 0
@@ -104,7 +108,7 @@
       connecting = (async () => {
         const res = await chrome.runtime.sendMessage({ type: 'ensure-offscreen' })
         if (!res || !res.ok) throw new Error('offscreen-unavailable')
-        const p = chrome.runtime.connect({ name: 'hearline-kokoro' })
+        const p = chrome.runtime.connect({ name: 'hearline-hq' })
         p.onMessage.addListener(onMessage)
         p.onDisconnect.addListener(() => {
           port = null
@@ -123,10 +127,13 @@
       if (msg.t === 'loading') c.cb.onStatus && c.cb.onStatus('loading')
       else if (msg.t === 'start') c.cb.onStatus && c.cb.onStatus('playing')
       else if (msg.t === 'progress') {
-        const idx = wordStartAt(c.text, Math.floor(msg.p * c.text.length))
+        // HQ tells us the character the voice is at (from phoneme weights). Without that
+        // map — the Kokoro path — fall back to the fraction of the audio played.
+        const pos = msg.char != null ? msg.char : Math.floor(msg.p * c.text.length)
+        const idx = wordStartAt(c.text, pos)
         if (idx !== c.lastWord) { c.lastWord = idx; c.cb.onWord && c.cb.onWord(idx) }
       } else if (msg.t === 'end') { cur = null; c.cb.onEnd && c.cb.onEnd() }
-      else if (msg.t === 'error') { cur = null; c.cb.onError && c.cb.onError(msg.message || 'kokoro-error') }
+      else if (msg.t === 'error') { cur = null; c.cb.onError && c.cb.onError(msg.message || 'hq-error') }
     }
 
     function wordStartAt(text, pos) {
@@ -137,33 +144,43 @@
     const send = (msg) => { if (port) port.postMessage(msg) }
 
     return {
-      id: 'kokoro',
+      id: 'hq',
       async speak(text, opts, cb) {
         const id = ++seq
         cur = { id, text, cb, lastWord: -1 }
         try {
           const p = await connect()
           if (!cur || cur.id !== id) return
-          p.postMessage({ t: 'speak', id, text, voice: opts.voice, rate: opts.rate, title: opts.title })
+          p.postMessage({
+            t: 'speak', id, text, voice: opts.voice, rate: opts.rate, title: opts.title,
+            backend: opts.engine || 'paradee', threads: opts.threads || 0,
+          })
         } catch (e) {
           if (cur && cur.id === id) { cur = null; cb.onError && cb.onError(String(e.message || e)) }
         }
+      },
+      /** Load the model and speak one word in the background, so the first real sentence is fast. */
+      async warm(engine, threads) {
+        try {
+          const p = await connect()
+          p.postMessage({ t: 'warm', backend: engine, threads })
+        } catch (e) { /* no offscreen yet: the first speak will pay for it */ }
       },
       pause() { send({ t: 'pause' }) },
       resume() { send({ t: 'resume' }) },
       cancel() { cur = null; send({ t: 'cancel' }) },
       setRate(rate) { send({ t: 'rate', rate }) },
-      prefetch(texts, voice) { if (port) send({ t: 'prefetch', texts, voice }) },
-      async exportAudio(texts, voice, title) {
+      prefetch(texts, opts) { if (port) send({ t: 'prefetch', texts, voice: opts.voice, backend: opts.engine, rate: opts.rate, threads: opts.threads || 0 }) },
+      async exportAudio(texts, opts) {
         const p = await connect()
-        p.postMessage({ t: 'export', texts, voice, title })
+        p.postMessage({ t: 'export', texts, voice: opts.voice, title: opts.title, backend: opts.engine, rate: opts.rate })
         return p
       },
       get port() { return port },
     }
   }
 
-  const api = { WebEngine, KokoroEngine }
+  const api = { WebEngine, HqEngine }
   HL.engines = api
   if (typeof module !== 'undefined') module.exports = api
 })(typeof globalThis !== 'undefined' ? globalThis : this)
